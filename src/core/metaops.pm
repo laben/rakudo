@@ -387,92 +387,86 @@ multi sub HYPER(&operator, Iterable:D \left, Iterable:D \right, :$dwim-left, :$d
     my \lefti  :=  left.iterator;
     my \righti :=  right.iterator;
 
-    # Check if a dwimmy side ends *. If so, that's considered a replication of the final element
-    my $left-elems  =  lefti.is-lazy ?? Inf !! left.elems;
-    my $right-elems = righti.is-lazy ?? Inf !! right.elems;
-    my $left-whatev = 0;
-    my $right-whatev = 0;
-    if $dwim-left and 1 < $left-elems < Inf and left[$left-elems - 1] ~~ Whatever {
-        $left-whatev++; $left-elems--;
+    # Check whether any side is lazy. They must not be to proceed.
+    if lefti.is-lazy {
+        X::HyperOp::Infinite.new(:side<both>, :&operator).throw if righti.is-lazy;
+        X::HyperOp::Infinite.new(:side<left>, :&operator).throw;
     }
-    if $dwim-right and 1 < $right-elems < Inf and right[$right-elems - 1] ~~ Whatever {
-        $right-whatev++; $right-elems--;
+    X::HyperOp::Infinite.new(:side<right>, :&operator).throw if righti.is-lazy;
+
+    # Prepare some variables
+    my $left-ended  = False;
+    my $right-ended = False;
+    my $left-elems  = 0;
+    my $right-elems = 0;
+    my $elems = 0;
+    my \leftb  := IterationBuffer.new;
+    my \rightb := IterationBuffer.new;
+
+    # First, we do the non dwimmy results and keep count of elements passed
+    # We end this loop as soon as the shorter has been cycled through
+    # TODO Whatever as last elem makes the list infinitely prolungable with the elem before the Whatever
+    loop {
+        my \leftv  := lefti.pull-one;
+        my \rightv := righti.pull-one;
+        $left-ended  = leftv  =:= IterationEnd;
+        $right-ended = rightv =:= IterationEnd;
+        leftb.push(leftv) unless $left-ended;
+        rightb.push(rightv) unless $right-ended;
+        last if $left-ended || $right-ended;
+        @result[$elems++] := HYPER(&operator, leftv, rightv, :$dwim-left, :$dwim-right);
+    }
+    $left-elems = $right-elems = $elems;
+
+    # If any side was empty and dwimmy (or both are empty), return the empty list
+    return () if $elems == 0;
+
+    # Return now if the dwim side is on the longer one
+    if ($left-ended && $right-ended) ||
+       (!$left-ended && $dwim-left && !$dwim-right) ||
+       (!$right-ended && $dwim-right && !$dwim-left) {
+        my $type = left.WHAT;
+        return (nqp::iscont(left) ?? $type(|@result.eager).item !! $type(|@result.eager)) if $type.^name ne "Seq";
+        return nqp::iscont(left) ?? List.new(|@result.eager).item !! List.new(|@result.eager);
     }
 
-    # Determine the number of elements we need, and how many we non-dwimmily have
-    my int $max-elems;
-    my int $min-elems;
-    if $left-elems == $right-elems {
-        X::HyperOp::Infinite.new(:side<both>, :&operator).throw
-            if $left-elems == Inf;
-        $max-elems = $min-elems = $left-elems;
-    }
-    elsif $dwim-left && $dwim-right {
-        X::HyperOp::Infinite.new(:side($left-elems == Inf ?? "left" !! "right"), :&operator).throw
-            if $left-elems | $right-elems == Inf;
-        $max-elems = $left-elems max $right-elems;
-        $min-elems = $left-elems min $right-elems;
-    }
-    elsif $dwim-left {
-        X::HyperOp::Infinite.new(:side<right>, :&operator).throw
-            if $right-elems == Inf;
-        $max-elems = $right-elems;
-        $min-elems = $left-elems min $right-elems; # could be truncation
-    }
-    elsif $dwim-right {
-        X::HyperOp::Infinite.new(:side<left>, :&operator).throw
-            if $left-elems == Inf;
-        $max-elems = $left-elems;
-        $min-elems = $left-elems min $right-elems; # could be truncation
-    }
-    else {
+    # Check whether a side is longer than the other and the shorter one is non dwimmy
+    if (!$left-ended && !$dwim-right) || (!$right-ended && !$dwim-left) {
         X::HyperOp::NonDWIM.new(:&operator, :$left-elems, :$right-elems).throw
     }
 
-    # Generate all of the non-dwimmmy results
-    my \leftb  := IterationBuffer.new if 0 < $left-elems < $max-elems;
-    my \rightb := IterationBuffer.new if 0 < $right-elems < $max-elems;
-    my ($last-left, $last-right);
-    for ^$min-elems {
-        my \leftv := lefti.pull-one;
-        my \rightv := righti.pull-one;
-        leftb.push(leftv)   if leftb;
-        rightb.push(rightv) if rightb;
-        @result[$_] := HYPER(&operator, leftv, rightv, :$dwim-left, :$dwim-right);
-    }
+    my $dwim-count = 0;
+    my $dwim-elems = $elems;
 
-    # Check if 0 < $elems since if either side is empty and dwimmy (or both are empty),
-    # and so @result should just remain empty.
-    # If $elems < $max-elems, on the other hand, we still have more dwimmy results to generate
-    if 0 < $left-elems < $max-elems {
-        if $left-whatev || $left-elems == 1 {
-            # Repeat last element
-            for $left-elems..^$max-elems {
-                @result[$_] := HYPER(&operator, leftb[$left-elems - 1], righti.pull-one, :$dwim-left, :$dwim-right);
-            }
-        } else {
-            # Cycle through the elements
-            for $left-elems..^$max-elems {
-                @result[$_] := HYPER(&operator, leftb[$_ % $left-elems], righti.pull-one, :$dwim-left, :$dwim-right);
-            }
+    # Handle the dangling elem we got form the longer side when the shorter one ended
+    if $right-ended {
+        @result[$dwim-elems++] := HYPER(&operator, leftb[*-1], rightb[$dwim-count], :$dwim-left, :$dwim-right);
+    }
+    else { ## $left-ended
+        @result[$dwim-elems++] := HYPER(&operator, leftb[$dwim-count], rightb[*-1], :$dwim-left, :$dwim-right);
+    }
+    $dwim-count = ($dwim-count + 1) % $elems;
+
+    # Get the rest
+    my $dwim-ended = False;
+    my \dwim-iter := $right-ended ?? lefti !! righti;
+    loop {
+        my \dwimv := dwim-iter.pull-one;
+        $dwim-ended = dwimv =:= IterationEnd;
+        last if $dwim-ended;
+        if $right-ended {
+            @result[$dwim-elems++] := HYPER(&operator, dwimv, rightb[$dwim-count], :$dwim-left, :$dwim-right);
         }
-    } elsif 0 < $right-elems < $max-elems {
-        if $right-whatev || $right-elems == 1 {
-            # Repeat last element
-            for $right-elems..^$max-elems {
-                @result[$_] := HYPER(&operator, lefti.pull-one, rightb[$right-elems - 1], :$dwim-left, :$dwim-right);
-            }
-        } else {
-            # Cycle through the elements
-            for $right-elems..^$max-elems {
-                @result[$_] := HYPER(&operator, lefti.pull-one, rightb[$_ % $right-elems], :$dwim-left, :$dwim-right);
-            }
+        else { ## $left-ended
+            @result[$dwim-elems++] := HYPER(&operator, leftb[$dwim-count], dwimv, :$dwim-left, :$dwim-right);
         }
+        $dwim-count = ($dwim-count + 1) % $elems;
     }
 
     # Coerce to the original type
     my $type = left.WHAT;
-    nqp::iscont(left) ?? $type(|@result.eager).item !! $type(|@result.eager)
+    return (nqp::iscont(left) ?? $type(|@result.eager).item !! $type(|@result.eager)) if $type.^name ne "Seq";
+    return nqp::iscont(left) ?? List.new(|@result.eager).item !! List.new(|@result.eager);
 }
 
 multi sub HYPER(\op, \obj) {
