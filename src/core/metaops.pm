@@ -426,7 +426,7 @@ multi sub HYPER(&operator, Iterable:D \left, Iterable:D \right, :$dwim-left, :$d
        (!$left-ended && $dwim-left && !$dwim-right) ||
        (!$right-ended && $dwim-right && !$dwim-left) {
         my $type = left.WHAT;
-        return (nqp::iscont(left) ?? $type(|@result.eager).item !! $type(|@result.eager)) if $type.^name ne "Seq";
+        return (nqp::iscont(left) ?? $type(|@result.eager).item !! $type(|@result.eager)) if nqp::istype($type, Seq);
         return nqp::iscont(left) ?? List.new(|@result.eager).item !! List.new(|@result.eager);
     }
 
@@ -465,7 +465,7 @@ multi sub HYPER(&operator, Iterable:D \left, Iterable:D \right, :$dwim-left, :$d
 
     # Coerce to the original type
     my $type = left.WHAT;
-    return (nqp::iscont(left) ?? $type(|@result.eager).item !! $type(|@result.eager)) if $type.^name ne "Seq";
+    return (nqp::iscont(left) ?? $type(|@result.eager).item !! $type(|@result.eager)) if nqp::istype($type, Seq);
     return nqp::iscont(left) ?? List.new(|@result.eager).item !! List.new(|@result.eager);
 }
 
